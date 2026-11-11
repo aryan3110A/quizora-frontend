@@ -1,0 +1,12 @@
+"use client";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { api } from "@/lib/api";
+
+type Performance = { totalAttempts:number; averageScore:number|null; results:Array<{quizTitle:string;score:number;totalMarks:number;percentage:number;submittedAt:string}> };
+export default function PerformancePage(){
+ const router=useRouter();const [data,setData]=useState<Performance|null>(null);const [error,setError]=useState("");
+ useEffect(()=>{api<Performance>("/student/performance").then(setData).catch(e=>{if(e?.status===401)router.replace("/login");else setError(e instanceof Error?e.message:"Unable to load performance.");});},[router]);
+ return <main className="min-h-screen bg-[#f5f8ff] px-5 py-8"><div className="mx-auto max-w-5xl"><Link href="/dashboard" className="text-sm font-semibold text-blue-700">← Dashboard</Link><h1 className="mt-5 text-3xl font-bold text-blue-950">Your performance</h1><p className="mt-2 text-slate-500">Scores are shown only after results are released.</p>{error&&<div className="mt-5 rounded-xl bg-red-50 p-4 text-red-700">{error}</div>}<div className="mt-7 grid gap-4 sm:grid-cols-2"><div className="rounded-2xl border border-slate-200 bg-white p-6"><p className="text-sm text-slate-500">Released attempts</p><p className="mt-2 text-3xl font-bold text-blue-950">{data?.totalAttempts??"—"}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-6"><p className="text-sm text-slate-500">Average percentage</p><p className="mt-2 text-3xl font-bold text-blue-950">{data?.averageScore==null?"—":`${data.averageScore}%`}</p></div></div><section className="mt-7 rounded-2xl border border-slate-200 bg-white p-6"><h2 className="font-bold text-blue-950">Released results</h2><div className="mt-4 space-y-3">{!data?.results.length?<p className="text-sm text-slate-500">No released results yet.</p>:data.results.map((r,i)=><div key={i} className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-4"><div><p className="font-semibold text-slate-800">{r.quizTitle}</p><p className="mt-1 text-xs text-slate-500">{new Date(r.submittedAt).toLocaleDateString()}</p></div><div className="text-right"><p className="font-bold text-blue-800">{r.score}/{r.totalMarks}</p><p className="text-sm text-slate-500">{r.percentage}%</p></div></div>)}</div></section></div></main>
+}
