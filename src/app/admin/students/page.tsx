@@ -41,8 +41,8 @@ export default function StudentsPage() {
       });
       setMessage(res.message);
       loadStudents();
-    } catch (err: any) {
-      setError(err?.message || "Failed to reset password.");
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : "Failed to reset password.");
     } finally {
       setResettingId(null);
       setConfirmStudent(null);
