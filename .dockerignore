@@ -1,0 +1,20 @@
+# Keep the build context small and keep local configuration OUT of the image.
+node_modules
+.next
+out
+.git
+.github
+.vscode
+tsconfig.tsbuildinfo
+
+# local env files: the API URL is passed as a build argument instead
+.env
+.env.*
+!.env.example
+
+tests
+coverage
+*.log
+*.md
+Dockerfile
+.dockerignore

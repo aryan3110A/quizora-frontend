@@ -1,120 +1,100 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { api } from "@/lib/api";
-import { AlertTriangle, CheckCircle2, Clock3, LoaderCircle, Send, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, LoaderCircle, RefreshCw, Send, WifiOff, X } from "lucide-react";
+import { ExamController } from "@/lib/exam/examController";
+import { httpExamApi } from "@/lib/exam/examApi";
+import { localStoragePendingStore } from "@/lib/exam/storage";
 
-type Question = {
-  id: string;
-  text: string;
-  type: "SINGLE_SELECT";
-  position: number;
-  marks: number;
-  options: Array<{ id: string; text: string; position: number }>;
-};
-
-type Attempt = {
-  id: string;
-  title: string;
-  deadlineAt: string;
-  questions: Question[];
-  answers: Record<string, string>;
-};
+function formatTime(totalSeconds: number) {
+  return `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
 
 export default function QuizAttemptPage() {
   const { quizId } = useParams<{ quizId: string }>();
   const router = useRouter();
-  const [attempt, setAttempt] = useState<Attempt | null>(null);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [saved, setSaved] = useState<Record<string, boolean>>({});
+  // All exam logic (server-clock countdown, autosave queue, auto-submit, status polling) lives in the controller.
+  const [controller] = useState(() => new ExamController({ quizId, api: httpExamApi, createStore: localStoragePendingStore }));
+  const snap = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const [current, setCurrent] = useState(0);
-  const [remaining, setRemaining] = useState(0);
-  const [error, setError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
 
   useEffect(() => {
-    api<Attempt>(`/student/quizzes/${quizId}/attempts`, { method: "POST", body: JSON.stringify({}) })
-      .then((a) => {
-        setAttempt(a);
-        setAnswers(a.answers ?? {});
-        setRemaining(Math.max(0, Math.floor((new Date(a.deadlineAt).getTime() - Date.now()) / 1000)));
-      })
-      .catch((e) => {
-        if (e?.status === 401) router.replace("/login");
-        else setError(e instanceof Error ? e.message : "Could not start or resume this quiz.");
-      });
-  }, [quizId, router]);
+    void controller.start();
+    const onOnline = () => controller.onOnline();
+    const onOffline = () => controller.onOffline();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") controller.onVisible();
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+      document.removeEventListener("visibilitychange", onVisibility);
+      controller.stop();
+    };
+  }, [controller]);
 
   useEffect(() => {
-    if (!attempt) return;
-    const timer = setInterval(() => {
-      setRemaining(Math.max(0, Math.floor((new Date(attempt.deadlineAt).getTime() - Date.now()) / 1000)));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [attempt]);
+    if (snap.redirectTo) router.replace(snap.redirectTo);
+  }, [snap.redirectTo, router]);
 
+  useEffect(() => {
+    if (snap.phase === "unauthenticated") router.replace("/login");
+  }, [snap.phase, router]);
+
+  const attempt = snap.attempt;
+  const answers = snap.answers;
   const question = attempt?.questions[current];
-  const time = useMemo(
-    () => `${String(Math.floor(remaining / 60)).padStart(2, "0")}:${String(remaining % 60).padStart(2, "0")}`,
-    [remaining]
-  );
-
-  const answeredCount = useMemo(() => {
-    return Object.values(answers).filter((v) => Boolean(v)).length;
-  }, [answers]);
-
+  const time = formatTime(snap.remainingSeconds);
+  const remaining = snap.remainingSeconds;
   const totalQuestions = attempt?.questions.length ?? 0;
+  const answeredCount = Object.values(answers).filter(Boolean).length;
   const unansweredCount = Math.max(0, totalQuestions - answeredCount);
-
-  async function choose(questionId: string, optionId: string) {
-    setAnswers((prev) => ({ ...prev, [questionId]: optionId }));
-    setSaved((prev) => ({ ...prev, [questionId]: false }));
-    try {
-      await api(`/student/attempts/${attempt!.id}/answers/${questionId}`, {
-        method: "PUT",
-        body: JSON.stringify({ selectedOptionId: optionId })
-      });
-      setSaved((prev) => ({ ...prev, [questionId]: true }));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Answer save failed. Please retry.");
-    }
-  }
+  const locked = snap.timeUp || snap.submitting;
 
   function requestSubmit() {
-    if (!attempt || submitting) return;
+    if (!attempt || snap.submitting || snap.timeUp) return;
     setShowConfirmModal(true);
   }
 
-  async function performSubmit() {
-    if (!attempt || submitting) return;
-    setSubmitting(true);
-    setError("");
-    try {
-      await api(`/student/attempts/${attempt.id}/submit`, { method: "POST", body: JSON.stringify({}) });
-      router.replace(`/results/${attempt.id}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Submission failed. Check your connection and retry.");
-      setSubmitting(false);
-      setShowConfirmModal(false);
-    }
+  function performSubmit() {
+    void controller.submit("manual", { force: snap.submitBlocked });
   }
 
-  if (error && !attempt) {
+  if (!attempt && (snap.phase === "error" || snap.phase === "ended")) {
     return (
       <main className="mx-auto max-w-2xl p-8">
-        <div className="rounded-2xl border border-red-200 bg-red-50 p-5 text-red-700">{error}</div>
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-5 text-red-700">{snap.error}</div>
+        <div className="mt-4 flex gap-3">
+          {snap.phase === "error" && (
+            <button
+              onClick={() => void controller.restart()}
+              className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              <RefreshCw size={15} /> Try again
+            </button>
+          )}
+          <Link href="/dashboard" className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">
+            Back to dashboard
+          </Link>
+        </div>
       </main>
     );
   }
 
-  if (!attempt) {
+  if (!attempt || snap.phase === "submitted") {
     return (
       <main className="grid min-h-screen place-items-center bg-[#f5f8ff]">
         <LoaderCircle className="animate-spin text-blue-600" size={32} />
       </main>
     );
   }
+
+  const status = question ? snap.saveStatus[question.id] : undefined;
 
   return (
     <main className="min-h-screen bg-[#f5f8ff]">
@@ -135,6 +115,36 @@ export default function QuizAttemptPage() {
         </div>
       </header>
 
+      {(snap.offline || snap.timeUp || snap.failedCount > 0) && (
+        <div className="mx-auto max-w-6xl space-y-2 px-5 pt-5">
+          {snap.timeUp && (
+            <div role="status" className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+              <LoaderCircle className="animate-spin" size={16} />
+              Time is up. Submitting your saved answers{snap.offline ? " — waiting for your connection, this will retry automatically" : ""}…
+            </div>
+          )}
+          {snap.offline && !snap.timeUp && (
+            <div role="status" className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              <WifiOff size={16} />
+              <span>
+                <strong>You appear to be offline.</strong> Your answers are kept on this device and will be saved automatically when the
+                connection returns. Keep this page open.
+              </span>
+            </div>
+          )}
+          {snap.failedCount > 0 && !snap.timeUp && (
+            <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              <span>
+                {snap.failedCount} {snap.failedCount === 1 ? "answer is" : "answers are"} not saved yet — retrying automatically.
+              </span>
+              <button onClick={() => controller.retrySave()} className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100">
+                Retry now
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="mx-auto grid max-w-6xl gap-6 px-5 py-7 lg:grid-cols-[1fr_260px]">
         <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-9 shadow-sm">
           <div className="flex items-center justify-between text-sm text-slate-500">
@@ -153,17 +163,16 @@ export default function QuizAttemptPage() {
 
           {question && (
             <>
-              <h2 className="mt-8 whitespace-pre-wrap text-xl font-semibold leading-8 text-slate-900">
-                {question.text}
-              </h2>
+              <h2 className="mt-8 whitespace-pre-wrap text-xl font-semibold leading-8 text-slate-900">{question.text}</h2>
               <div className="mt-6 space-y-3">
                 {question.options.map((o, i) => {
                   const selected = answers[question.id] === o.id;
                   return (
                     <button
                       key={o.id}
-                      onClick={() => choose(question.id, o.id)}
-                      className={`flex w-full items-start gap-3 rounded-xl border p-4 text-left transition ${
+                      disabled={locked}
+                      onClick={() => controller.choose(question.id, o.id)}
+                      className={`flex w-full items-start gap-3 rounded-xl border p-4 text-left transition disabled:cursor-not-allowed ${
                         selected
                           ? "border-blue-500 bg-blue-50 ring-2 ring-blue-100"
                           : "border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50"
@@ -182,21 +191,24 @@ export default function QuizAttemptPage() {
                   );
                 })}
               </div>
-              <div className="mt-5 text-xs text-slate-500">
-                {saved[question.id] === true
-                  ? "✓ Answer saved"
-                  : answers[question.id]
-                  ? "Saving answer…"
-                  : "Choose an answer"}{" "}
-                · Answers save automatically
+              <div className="mt-5 flex flex-wrap items-center gap-x-2 text-xs text-slate-500">
+                {status === "failed" ? (
+                  <>
+                    <span className="font-semibold text-red-700">⚠ Not saved yet — retrying automatically</span>
+                    <button onClick={() => controller.retrySave(question.id)} className="font-semibold text-blue-700 underline">
+                      Retry now
+                    </button>
+                  </>
+                ) : status === "pending" || status === "saving" ? (
+                  <span>Saving answer…</span>
+                ) : answers[question.id] ? (
+                  <span>✓ Answer saved</span>
+                ) : (
+                  <span>Choose an answer</span>
+                )}
+                <span>· Answers save automatically</span>
               </div>
             </>
-          )}
-
-          {error && (
-            <div role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
-              {error}
-            </div>
           )}
 
           <div className="mt-8 flex flex-wrap justify-between gap-3">
@@ -216,7 +228,7 @@ export default function QuizAttemptPage() {
               </button>
             ) : (
               <button
-                disabled={submitting}
+                disabled={locked}
                 onClick={requestSubmit}
                 className="rounded-xl bg-blue-600 px-5 py-2.5 font-semibold text-white hover:bg-blue-700 transition disabled:opacity-60 flex items-center gap-2"
               >
@@ -244,6 +256,8 @@ export default function QuizAttemptPage() {
                 className={`aspect-square rounded-lg border text-sm font-semibold transition ${
                   current === i
                     ? "border-blue-600 bg-blue-600 text-white shadow-sm"
+                    : snap.saveStatus[q.id] === "failed"
+                    ? "border-red-300 bg-red-50 text-red-700 hover:bg-red-100"
                     : answers[q.id]
                     ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
                     : "border-slate-200 text-slate-600 hover:bg-slate-50"
@@ -267,12 +281,18 @@ export default function QuizAttemptPage() {
               <span className="h-3 w-3 rounded bg-white border border-slate-300 inline-block" />
               <span>Unanswered ({unansweredCount})</span>
             </div>
+            {snap.failedCount > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="h-3 w-3 rounded bg-red-100 border border-red-300 inline-block" />
+                <span>Not saved yet ({snap.failedCount})</span>
+              </div>
+            )}
           </div>
 
           <button
-            disabled={submitting}
+            disabled={locked}
             onClick={requestSubmit}
-            className="mt-6 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white hover:bg-blue-700 transition flex items-center justify-center gap-2 shadow-sm"
+            className="mt-6 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white hover:bg-blue-700 transition flex items-center justify-center gap-2 shadow-sm disabled:opacity-60"
           >
             <Send size={16} />
             Submit quiz
@@ -281,7 +301,7 @@ export default function QuizAttemptPage() {
       </div>
 
       {/* Styled Confirmation Modal */}
-      {showConfirmModal && (
+      {showConfirmModal && !snap.timeUp && (
         <div
           role="dialog"
           aria-modal="true"
@@ -289,7 +309,7 @@ export default function QuizAttemptPage() {
         >
           <div className="relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl animate-in zoom-in-95 duration-150">
             <button
-              onClick={() => !submitting && setShowConfirmModal(false)}
+              onClick={() => !snap.submitting && setShowConfirmModal(false)}
               className="absolute top-4 right-4 rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition"
               aria-label="Close"
             >
@@ -317,9 +337,7 @@ export default function QuizAttemptPage() {
               </div>
               <div className="flex items-center justify-between text-sm">
                 <span className="text-slate-600">Unanswered</span>
-                <span className={`font-semibold ${unansweredCount > 0 ? "text-amber-600" : "text-slate-600"}`}>
-                  {unansweredCount}
-                </span>
+                <span className={`font-semibold ${unansweredCount > 0 ? "text-amber-600" : "text-slate-600"}`}>{unansweredCount}</span>
               </div>
               <div className="flex items-center justify-between text-sm">
                 <span className="text-slate-600">Time remaining</span>
@@ -331,15 +349,15 @@ export default function QuizAttemptPage() {
               <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
                 <p className="font-semibold">⚠️ Attention:</p>
                 <p className="mt-0.5">
-                  You still have {unansweredCount} unanswered {unansweredCount === 1 ? "question" : "questions"}.
-                  Are you sure you want to finish now?
+                  You still have {unansweredCount} unanswered {unansweredCount === 1 ? "question" : "questions"}. Are you sure you want to
+                  finish now?
                 </p>
               </div>
             )}
 
-            {error && (
+            {snap.submitError && (
               <div role="alert" className="mt-3 rounded-lg bg-red-50 p-2.5 text-xs text-red-700">
-                {error}
+                {snap.submitError}
               </div>
             )}
 
@@ -347,7 +365,7 @@ export default function QuizAttemptPage() {
               <button
                 type="button"
                 onClick={() => setShowConfirmModal(false)}
-                disabled={submitting}
+                disabled={snap.submitting}
                 className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition disabled:opacity-50"
               >
                 Return to quiz
@@ -355,12 +373,16 @@ export default function QuizAttemptPage() {
               <button
                 type="button"
                 onClick={performSubmit}
-                disabled={submitting}
+                disabled={snap.submitting}
                 className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 transition disabled:opacity-60 flex items-center gap-2 shadow-sm"
               >
-                {submitting ? (
+                {snap.submitting ? (
                   <>
-                    <LoaderCircle className="animate-spin" size={16} /> Submitting…
+                    <LoaderCircle className="animate-spin" size={16} /> Saving &amp; submitting…
+                  </>
+                ) : snap.submitBlocked ? (
+                  <>
+                    <Send size={15} /> Submit anyway
                   </>
                 ) : (
                   <>

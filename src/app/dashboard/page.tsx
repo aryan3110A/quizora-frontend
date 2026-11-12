@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -47,25 +47,33 @@ export default function DashboardPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [activeModal, setActiveModal] = useState<StudentCardModal>(null);
 
-  function loadDashboard(silent = false) {
-    if (!silent) setRefreshing(true);
-    return api<Dashboard>("/student/dashboard")
-      .then(setData)
-      .catch((e) => {
-        if (e?.status === 401) router.replace("/login");
-        else setError(e instanceof Error ? e.message : "Dashboard could not be loaded.");
-      })
-      .finally(() => {
-        setLoading(false);
-        setRefreshing(false);
-      });
+  // Fetch only: state is set from the promise callbacks, so it is safe to call from an effect.
+  const fetchDashboard = useCallback(
+    () =>
+      api<Dashboard>("/student/dashboard")
+        .then(setData)
+        .catch((e) => {
+          if (e?.status === 401) router.replace("/login");
+          else setError(e instanceof Error ? e.message : "Dashboard could not be loaded.");
+        })
+        .finally(() => {
+          setLoading(false);
+          setRefreshing(false);
+        }),
+    [router]
+  );
+
+  // Manual refresh button: same fetch, plus the spinner.
+  function loadDashboard() {
+    setRefreshing(true);
+    return fetchDashboard();
   }
 
   useEffect(() => {
-    loadDashboard();
-    const timer = setInterval(() => loadDashboard(true), 12000);
+    void fetchDashboard();
+    const timer = setInterval(() => void fetchDashboard(), 12000);
     return () => clearInterval(timer);
-  }, [router]);
+  }, [fetchDashboard]);
 
   async function logout() {
     await api("/auth/logout", { method: "POST", body: JSON.stringify({}) }).catch(() => undefined);
@@ -86,7 +94,7 @@ export default function DashboardPage() {
           </Link>
           <div className="flex items-center gap-3">
             <button
-              onClick={() => loadDashboard(false)}
+              onClick={() => loadDashboard()}
               disabled={refreshing}
               className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition"
               title="Refresh dashboard data"

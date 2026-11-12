@@ -80,10 +80,10 @@ export default function ProfilePage() {
       setTimeout(() => {
         router.replace("/login");
       }, 2000);
-    } catch (err: any) {
+    } catch (err) {
       setStatusMessage({
         type: "error",
-        text: err?.message || "Failed to change password. Please check your current password."
+        text: err instanceof Error && err.message ? err.message : "Failed to change password. Please check your current password."
       });
     } finally {
       setSubmitting(false);
