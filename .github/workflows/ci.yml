@@ -1,18 +1,37 @@
 name: Frontend CI
+
 on:
   push:
   pull_request:
+
+# CI only reads the repository. No secrets are used anywhere in this workflow.
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
+    name: check (typecheck, tests, lint, build, image)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm install
+      - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run lint
       - run: npm run build
+
+      # The production image: the API URL is a build ARGUMENT (compiled into the browser bundle); it must be the relative same-origin path.
+      - name: Docker image builds and calls the same origin
+        run: |
+          docker build --build-arg NEXT_PUBLIC_API_BASE_URL=/api/v1 -t quizora-frontend:ci .
+          test "$(docker run --rm --entrypoint id quizora-frontend:ci -un)" = "node"
+          test "$(docker run --rm --entrypoint sh quizora-frontend:ci -c 'grep -rl localhost:4000 .next | wc -l')" = "0"
